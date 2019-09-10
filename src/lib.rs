@@ -1,103 +1,83 @@
-use std::ffi::{CStr, CString};
-use std::io;
+use std::ffi::CStr;
 use std::io::prelude::*;
-use std::ptr;
 
 use csv;
+use lexical;
 use libc;
-use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use zip;
 
-#[derive(Serialize, Deserialize)]
-pub struct Tick {
-    pub time: i64,
-    pub trade_sale: i64,
-    pub trade_volume: i64,
-    pub exchange: char,
-    pub sale_condition: Option<char>,
-    pub suspicious: i64
-}
-
-#[repr(C)]
-pub struct TickResult {
-    pub size: i64,
-    pub buf: *mut i64
-}
-
+/*
 #[no_mangle]
-pub extern fn ParseEquityTickExtern(path: *const libc::c_char, dataTimeZone: i64, exchange_time_zone: i64) -> TickResult {
+pub extern fn ParseEquityTickExtern(data: *mut i32, buf_size: i64, path: *const libc::c_char) -> i64 {
     let data_path = unsafe { CStr::from_ptr(path) }.to_str();
 
     if data_path.is_err() {
         println!("Failed to read string");
-        return TickResult {
-            size: 0,
-            buf: [].as_mut_ptr()
-        }
+        return 0
     }
 
     let file = std::fs::File::open(&data_path.unwrap());
 
     if file.is_err() {
         println!("Failed to open file {}", data_path.unwrap());
-        return TickResult {
-            size: 0,
-            buf: [].as_mut_ptr()
-        }
+        return 0
     }
 
-    let archive = zip::ZipArchive::new(file.unwrap());
+    let mut archive = zip::ZipArchive::new(file.unwrap()).expect("Archive");
+    let file_zip = archive.by_index(0).expect("Missing file");
 
-    if archive.is_err() {
-        println!("Failed to parse zip file {}", data_path.unwrap());
-        return TickResult {
-            size: 0,
-            buf: [].as_mut_ptr()
-        }
-    }
-
-    let bytes = archive.unwrap()
-        .by_index(0)
-        .expect("Failed to find file inside zip")
-        .bytes()
-        .map(|i| i.expect("Failed to get thing"))
-        .collect::<Vec<u8>>();
-
-    let mut csv = csv::ReaderBuilder::new()
+    let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
-        .from_reader(&bytes[..]);
+        .from_reader(file_zip);
 
-    let iter = csv.deserialize::<Tick>().collect::<Vec<Result<Tick, _>>>();//.map(|i| i.unwrap()).collect();
-    //let mut data = Vec::with_capacity(iter.len());
+    let mut record = csv::ByteRecord::with_capacity(60, 6);
+    let mut i: isize = 0;
 
-    let mut data: Vec<i64> = iter.par_iter().map(|i| i.unwrap()).map(|tick| {
-        let formatted = vec![
-            tick.time, 
-            tick.trade_sale, 
-            tick.trade_volume, 
-            (tick.exchange as u32 - '0' as u32) as i64,
-            (tick.sale_condition.unwrap() as u32 - '0' as u32) as i64,
-            tick.suspicious
-        ];
+    unsafe { 
+        while reader.read_byte_record(&mut record).expect("Read byte record") {
+            let tick = record.deserialize::<Tick>(None).expect("Deserialize");
 
-        formatted })
-        .flatten()
-        .collect();
+            let time = data.offset(i);
+            *time = tick.time;
 
-    let len = data.len();
-    let ptr = data.as_mut_ptr();
+            let trade_sale = data.offset(i + 1);
+            *trade_sale = tick.trade_sale;
 
-    // Have to deallocate after the fact
-    std::mem::forget(data);
+            let trade_volume = data.offset(i + 2);
+            *trade_volume = tick.trade_volume;
+            
+            let exchange = data.offset(i + 3);
+            *exchange = tick.exchange as i32 - '0' as i32;
+            
+            let sale_condition = data.offset(i + 4);
+            *sale_condition = tick.sale_condition.map_or(0, |c| c as i32 - '0' as i32);
+            
+            let suspicious = data.offset(i + 5);
+            *suspicious = tick.suspicious;
 
-    TickResult {
-        size: len as i64,
-        buf: ptr
+            i += 6;
+        }
     }
+
+    return i as i64;
 }
+*/
 
 #[no_mangle]
-pub extern fn DisposeExtern(result: TickResult) {
-    unsafe { drop(Vec::from_raw_parts(result.buf, result.size as usize, result.size as usize)); }
+pub extern fn ParseTickCsvLine(buf: *mut i32, line: *const libc::c_char) {
+    let csv = unsafe { CStr::from_ptr(line) }.to_str().unwrap();
+
+    unsafe {
+        for (i, data) in csv.split(',').enumerate() {
+            let offset = buf.offset(i as isize);
+
+            if i >= 3 && i < 5 {
+                *offset = data.chars().next().unwrap_or('0') as i32 - '0' as i32;
+                continue;
+            }
+
+            *offset = lexical::parse::<i32, _>(data).unwrap();
+        }
+    }
 }
